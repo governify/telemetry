@@ -1,0 +1,13 @@
+telemetry.governify.io {
+	root * /srv/landing
+	file_server
+}
+
+grafana.telemetry.governify.io {
+	reverse_proxy grafana:3000
+}
+
+collector.telemetry.governify.io {
+	redir / /debug/servicez
+	reverse_proxy otel-collector:55679
+}
