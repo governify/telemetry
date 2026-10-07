@@ -5,8 +5,8 @@
     "name": "noc-overview",
     "namespace": "default",
     "uid": "e8f43f84-f2d4-4248-b192-86f89281971e",
-    "resourceVersion": "1791407379294987",
-    "generation": 4,
+    "resourceVersion": "1791409179937000",
+    "generation": 5,
     "creationTimestamp": "2026-10-07T20:38:15Z",
     "labels": {
       "grafana.app/deprecatedInternalID": "248921947324416"
@@ -16,11 +16,11 @@
       "grafana.app/folder": "afyh8h0pi9czkc",
       "grafana.app/managedBy": "classic-file-provisioning",
       "grafana.app/managerId": "Telemetry Stack",
-      "grafana.app/sourceChecksum": "e40d4ba4777aa7e65e522f5322f82156",
+      "grafana.app/sourceChecksum": "10818f666dd106141fdb2c3e828cc429",
       "grafana.app/sourcePath": "/etc/grafana/provisioning/dashboards/files/noc-overview.json",
-      "grafana.app/sourceTimestamp": "1791407374000",
+      "grafana.app/sourceTimestamp": "1791409174000",
       "grafana.app/updatedBy": "access-policy:service",
-      "grafana.app/updatedTimestamp": "2026-10-07T21:09:39Z",
+      "grafana.app/updatedTimestamp": "2026-10-07T21:39:39Z",
       "grafana.app/folderTitle": "Observability",
       "grafana.app/folderUrl": "/dashboards/f/afyh8h0pi9czkc/observability"
     }
@@ -1772,7 +1772,7 @@
                 "kind": "ElementReference",
                 "name": "panel-8"
               },
-              "height": 6,
+              "height": 7,
               "width": 12,
               "x": 0,
               "y": 3
@@ -1785,7 +1785,7 @@
                 "kind": "ElementReference",
                 "name": "panel-11"
               },
-              "height": 6,
+              "height": 7,
               "width": 12,
               "x": 12,
               "y": 3
@@ -1801,7 +1801,7 @@
               "height": 16,
               "width": 12,
               "x": 0,
-              "y": 9
+              "y": 10
             }
           },
           {
@@ -1811,10 +1811,10 @@
                 "kind": "ElementReference",
                 "name": "panel-10"
               },
-              "height": 5,
+              "height": 8,
               "width": 12,
               "x": 12,
-              "y": 9
+              "y": 10
             }
           },
           {
@@ -1824,10 +1824,10 @@
                 "kind": "ElementReference",
                 "name": "panel-9"
               },
-              "height": 11,
+              "height": 8,
               "width": 12,
               "x": 12,
-              "y": 14
+              "y": 18
             }
           }
         ]
