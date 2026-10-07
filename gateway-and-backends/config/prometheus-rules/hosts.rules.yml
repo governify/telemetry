@@ -1,0 +1,62 @@
+# Server (host) level rules, fed by the docker-host / Kubernetes-node agents (hostmetrics receiver).
+# Identity is host_name = the server; every rule below is keyed by it.
+#   host:up                                  1 = agent pushed in the last 3 minutes (0 = seen in last 24h, silent now)
+#   host:cpu_utilization:ratio               1 - idle
+#   host:memory_utilization:ratio            "used" state (excludes page cache / buffers)
+#   host:filesystem_utilization:ratio        fullest real filesystem
+#   host:load_per_core:ratio                 5m load average / logical CPUs
+#   host:processes:count, host:uptime:seconds, host:containers_running:count
+#   host:health:state                        0 OK, 1 warning, 2 critical (down, or CPU/mem >= 85%/95%, disk >= 80%/90%, load/core >= 1.5/3)
+groups:
+  - name: hosts
+    interval: 30s
+    rules:
+      - record: host:up
+        expr: |
+          max by (host_name) ((time() - timestamp(system_uptime_seconds{host_name!=""})) < bool 180)
+          or
+          (0 * max by (host_name) (last_over_time(system_uptime_seconds{host_name!=""}[1d])))
+
+      - record: host:cpu_utilization:ratio
+        expr: 1 - avg by (host_name) (system_cpu_utilization_ratio{state="idle", host_name!=""})
+
+      - record: host:memory_utilization:ratio
+        expr: max by (host_name) (system_memory_utilization_ratio{state="used", host_name!=""})
+
+      - record: host:filesystem_utilization:ratio
+        expr: max by (host_name) (system_filesystem_utilization_ratio{host_name!=""})
+
+      - record: host:load_per_core:ratio
+        expr: |
+          max by (host_name) (system_cpu_load_average_5m{host_name!=""})
+            / max by (host_name) (system_cpu_logical_count{host_name!=""})
+
+      - record: host:processes:count
+        expr: sum by (host_name) (system_processes_count{host_name!=""})
+
+      - record: host:uptime:seconds
+        expr: max by (host_name) (system_uptime_seconds{host_name!=""})
+
+      - record: host:containers_running:count
+        expr: count by (host_name) (container_uptime_seconds{host_name!=""})
+
+  - name: host_health
+    interval: 30s
+    rules:
+      - record: host:health_availability:state
+        expr: (1 - host:up) * 2
+
+      - record: host:health_cpu:state
+        expr: (host:cpu_utilization:ratio >= bool 0.85) + (host:cpu_utilization:ratio >= bool 0.95)
+
+      - record: host:health_memory:state
+        expr: (host:memory_utilization:ratio >= bool 0.85) + (host:memory_utilization:ratio >= bool 0.95)
+
+      - record: host:health_disk:state
+        expr: (host:filesystem_utilization:ratio >= bool 0.80) + (host:filesystem_utilization:ratio >= bool 0.90)
+
+      - record: host:health_load:state
+        expr: (host:load_per_core:ratio >= bool 1.5) + (host:load_per_core:ratio >= bool 3)
+
+      - record: host:health:state
+        expr: max by (host_name) ({__name__=~"host:health_(availability|cpu|memory|disk|load):state"})

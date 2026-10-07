@@ -1,0 +1,171 @@
+# Alerts feed the `ALERTS` series (shown on the NOC dashboard) and Grafana's alert list.
+# There is no Alertmanager yet: nothing is notified until one is added (see gateway-and-backends/README.md).
+groups:
+  - name: applications
+    rules:
+      - alert: ServiceDown
+        expr: service:up == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service_namespace }}/{{ $labels.service_name }} stopped reporting"
+          description: "No instance has pushed telemetry for over 3 minutes."
+          dashboard: "https://grafana.telemetry.governify.io/d/app-status?var-namespace={{ $labels.service_namespace }}"
+
+      - alert: ServiceReplicasLost
+        expr: |
+          service:instances:count
+            < 0.5 * max_over_time(service:instances:count[6h])
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_namespace }}/{{ $labels.service_name }} lost half of its replicas"
+          dashboard: "https://grafana.telemetry.governify.io/d/app-status?var-namespace={{ $labels.service_namespace }}"
+
+      - alert: AppErrorRateHigh
+        expr: namespace:http_error_ratio:5m >= 0.05 and namespace:http_requests:rate5m > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service_namespace }}: {{ $value | humanizePercentage }} of requests fail (5xx)"
+          dashboard: "https://grafana.telemetry.governify.io/d/app-status?var-namespace={{ $labels.service_namespace }}"
+
+      - alert: AppErrorRateElevated
+        expr: namespace:http_error_ratio:5m >= 0.01 and namespace:http_error_ratio:5m < 0.05 and namespace:http_requests:rate5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_namespace }}: {{ $value | humanizePercentage }} of requests fail (5xx)"
+          dashboard: "https://grafana.telemetry.governify.io/d/app-status?var-namespace={{ $labels.service_namespace }}"
+
+      - alert: AppLatencyHigh
+        expr: namespace:http_request_duration_seconds:p95 >= 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service_namespace }}: p95 latency {{ $value | humanizeDuration }}"
+          dashboard: "https://grafana.telemetry.governify.io/d/app-status?var-namespace={{ $labels.service_namespace }}"
+
+  - name: telemetry_pipeline
+    rules:
+      - alert: CollectorExportFailing
+        expr: sum by (exporter) (rate(otelcol_exporter_send_failed_spans[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          signal: spans
+        annotations:
+          summary: "OTel Collector exporter {{ $labels.exporter }} is dropping spans"
+
+      - alert: CollectorExportFailing
+        expr: sum by (exporter) (rate(otelcol_exporter_send_failed_metric_points[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          signal: metrics
+        annotations:
+          summary: "OTel Collector exporter {{ $labels.exporter }} is dropping metrics"
+
+      - alert: CollectorExportFailing
+        expr: sum by (exporter) (rate(otelcol_exporter_send_failed_log_records[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          signal: logs
+        annotations:
+          summary: "OTel Collector exporter {{ $labels.exporter }} is dropping logs"
+
+      - alert: CollectorRefusingData
+        expr: sum by (receiver) (rate(otelcol_receiver_refused_spans[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          signal: spans
+        annotations:
+          summary: "OTel Collector receiver {{ $labels.receiver }} is refusing spans (memory_limiter or backend back-pressure)"
+
+      - alert: CollectorRefusingData
+        expr: sum by (receiver) (rate(otelcol_receiver_refused_metric_points[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          signal: metrics
+        annotations:
+          summary: "OTel Collector receiver {{ $labels.receiver }} is refusing metrics (memory_limiter or backend back-pressure)"
+
+      - alert: CollectorRefusingData
+        expr: sum by (receiver) (rate(otelcol_receiver_refused_log_records[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          signal: logs
+        annotations:
+          summary: "OTel Collector receiver {{ $labels.receiver }} is refusing logs (memory_limiter or backend back-pressure)"
+
+      - alert: CollectorDown
+        expr: up{job="otel-collector-internal"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OTel Collector is not scrapable — no telemetry is being ingested"
+
+  - name: hosts_and_containers
+    rules:
+      - alert: HostDown
+        expr: host:up == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.host_name }} stopped reporting"
+          dashboard: "https://grafana.telemetry.governify.io/d/server-status?var-host={{ $labels.host_name }}"
+
+      - alert: HostDiskAlmostFull
+        expr: host:filesystem_utilization:ratio >= 0.90
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.host_name }}: a filesystem is {{ $value | humanizePercentage }} full"
+          dashboard: "https://grafana.telemetry.governify.io/d/server-status?var-host={{ $labels.host_name }}"
+
+      - alert: HostDiskFilling
+        expr: host:filesystem_utilization:ratio >= 0.80 and host:filesystem_utilization:ratio < 0.90
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host_name }}: a filesystem is {{ $value | humanizePercentage }} full"
+          dashboard: "https://grafana.telemetry.governify.io/d/server-status?var-host={{ $labels.host_name }}"
+
+      - alert: HostCpuHigh
+        expr: host:cpu_utilization:ratio >= 0.90
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host_name }}: CPU at {{ $value | humanizePercentage }}"
+          dashboard: "https://grafana.telemetry.governify.io/d/server-status?var-host={{ $labels.host_name }}"
+
+      - alert: HostMemoryHigh
+        expr: host:memory_utilization:ratio >= 0.90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.host_name }}: memory at {{ $value | humanizePercentage }} (page cache excluded)"
+          dashboard: "https://grafana.telemetry.governify.io/d/server-status?var-host={{ $labels.host_name }}"
+
+      # docker_stats reports container.restarts as the engine's restart counter
+      - alert: ContainerRestartLoop
+        expr: increase(container_restarts_total[30m]) >= 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service_namespace }}/{{ $labels.container_name }} restarted {{ $value | printf \"%.0f\" }} times in 30m on {{ $labels.host_name }}"

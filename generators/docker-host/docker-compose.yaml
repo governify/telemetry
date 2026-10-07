@@ -1,0 +1,23 @@
+services:
+  otel-agent:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    container_name: otel-agent
+    restart: unless-stopped
+    labels: # identity in the dashboards (see ../README.md); the agent belongs to the telemetry application
+      telemetry.service.namespace: telemetry
+      telemetry.service.name: otel-agent
+    user: "0:0" # needs to read /var/run/docker.sock and the host's /proc
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      - HOST_NAME=${HOST_NAME:?set HOST_NAME in .env}
+      - GATEWAY_OTLP_ENDPOINT=${GATEWAY_OTLP_ENDPOINT:-telemetry.governify.io:4317}
+      - DEPLOYMENT_ENVIRONMENT=${DEPLOYMENT_ENVIRONMENT:-production}
+    volumes:
+      - ./otel-agent-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - /:/hostfs:ro,rslave
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Uncomment to let apps on this server send OTLP to the agent instead of straight to the gateway
+    # (the ports are only needed if nothing else on the host already uses 4317/4318).
+    # ports:
+    #   - 4317:4317
+    #   - 4318:4318

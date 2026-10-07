@@ -1,0 +1,126 @@
+# Semantic layer for HTTP request metrics. Dashboards (T1/T2 stats, tiles, tables) read the
+# unified series produced here instead of raw metrics, so semconv / SDK differences live in one place.
+#
+# Source priority per (service_namespace, service_name), first one present wins:
+#   1. stable semconv   http_server_request_duration_seconds_*   (s,  http_response_status_code)
+#   2. legacy semconv   http_server_duration_milliseconds_*      (ms, http_status_code)
+#   3. Tempo span-metrics traces_spanmetrics_*                    (s,  service -> service_name)
+#
+# Only series with a service_namespace are considered (application = namespace; see generators/README.md).
+#
+# Unified outputs
+#   route_class:http_requests:rate5m                    {ns, service, env, http_route, status_class}
+#   service:http_{requests,errors,client_errors}:rate5m {ns, service, env}   errors = 5xx
+#   service:http_error_ratio:5m                         {ns, service, env}
+#   service:http_request_duration_seconds:p50|p95|p99   {ns, service, env}
+#   namespace:http_*                                    {ns}   (all environments)
+groups:
+  - name: http_red_counts
+    interval: 30s
+    rules:
+      - record: src_stable:route_class:http_requests:rate5m
+        expr: |
+          sum by (service_namespace, service_name, deployment_environment_name, http_route, status_class) (
+            label_replace(rate(http_server_request_duration_seconds_count{service_namespace!=""}[5m]),
+              "status_class", "${1}xx", "http_response_status_code", "([0-9]).."))
+
+      - record: src_legacy:route_class:http_requests:rate5m
+        expr: |
+          sum by (service_namespace, service_name, deployment_environment_name, http_route, status_class) (
+            label_replace(rate(http_server_duration_milliseconds_count{service_namespace!=""}[5m]),
+              "status_class", "${1}xx", "http_status_code", "([0-9]).."))
+
+      - record: src_spans:route_class:http_requests:rate5m
+        expr: |
+          sum by (service_namespace, service_name, deployment_environment_name, http_route, status_class) (
+            label_replace(
+              label_replace(rate(traces_spanmetrics_calls_total{span_kind="SPAN_KIND_SERVER", service_namespace!=""}[5m]),
+                "service_name", "$1", "service", "(.+)"),
+              "status_class", "${1}xx", "http_response_status_code", "([0-9]).."))
+
+      - record: route_class:http_requests:rate5m
+        expr: |
+          src_stable:route_class:http_requests:rate5m
+          or (src_legacy:route_class:http_requests:rate5m
+                unless on (service_namespace, service_name) src_stable:route_class:http_requests:rate5m)
+          or (src_spans:route_class:http_requests:rate5m
+                unless on (service_namespace, service_name)
+                  (src_stable:route_class:http_requests:rate5m or src_legacy:route_class:http_requests:rate5m))
+
+      - record: service:http_requests:rate5m
+        expr: sum by (service_namespace, service_name, deployment_environment_name) (route_class:http_requests:rate5m)
+
+      # 5xx / 4xx are zero-filled from the request series so a healthy service reads 0, not "no data"
+      - record: service:http_errors:rate5m
+        expr: |
+          sum by (service_namespace, service_name, deployment_environment_name) (route_class:http_requests:rate5m{status_class="5xx"})
+          or (0 * service:http_requests:rate5m)
+
+      - record: service:http_client_errors:rate5m
+        expr: |
+          sum by (service_namespace, service_name, deployment_environment_name) (route_class:http_requests:rate5m{status_class="4xx"})
+          or (0 * service:http_requests:rate5m)
+
+      # idle services (0 requests) produce no ratio at all rather than NaN
+      - record: service:http_error_ratio:5m
+        expr: (service:http_errors:rate5m / service:http_requests:rate5m) >= 0
+
+      - record: namespace:http_requests:rate5m
+        expr: sum by (service_namespace) (service:http_requests:rate5m)
+
+      - record: namespace:http_errors:rate5m
+        expr: sum by (service_namespace) (service:http_errors:rate5m)
+
+      - record: namespace:http_error_ratio:5m
+        expr: (namespace:http_errors:rate5m / namespace:http_requests:rate5m) >= 0
+
+  - name: http_red_latency
+    interval: 30s
+    rules:
+      - record: service:http_request_duration_seconds:p50
+        expr: |
+          (
+              histogram_quantile(0.50, sum by (le, service_namespace, service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_bucket{service_namespace!=""}[5m])))
+            or (histogram_quantile(0.50, sum by (le, service_namespace, service_name, deployment_environment_name) (rate(http_server_duration_milliseconds_bucket{service_namespace!=""}[5m]))) / 1000
+                  unless on (service_namespace, service_name) src_stable:route_class:http_requests:rate5m)
+            or (histogram_quantile(0.50, sum by (le, service_namespace, service_name, deployment_environment_name) (
+                  label_replace(rate(traces_spanmetrics_latency_bucket{span_kind="SPAN_KIND_SERVER", service_namespace!=""}[5m]), "service_name", "$1", "service", "(.+)")))
+                  unless on (service_namespace, service_name)
+                    (src_stable:route_class:http_requests:rate5m or src_legacy:route_class:http_requests:rate5m))
+          ) >= 0
+
+      - record: service:http_request_duration_seconds:p95
+        expr: |
+          (
+              histogram_quantile(0.95, sum by (le, service_namespace, service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_bucket{service_namespace!=""}[5m])))
+            or (histogram_quantile(0.95, sum by (le, service_namespace, service_name, deployment_environment_name) (rate(http_server_duration_milliseconds_bucket{service_namespace!=""}[5m]))) / 1000
+                  unless on (service_namespace, service_name) src_stable:route_class:http_requests:rate5m)
+            or (histogram_quantile(0.95, sum by (le, service_namespace, service_name, deployment_environment_name) (
+                  label_replace(rate(traces_spanmetrics_latency_bucket{span_kind="SPAN_KIND_SERVER", service_namespace!=""}[5m]), "service_name", "$1", "service", "(.+)")))
+                  unless on (service_namespace, service_name)
+                    (src_stable:route_class:http_requests:rate5m or src_legacy:route_class:http_requests:rate5m))
+          ) >= 0
+
+      - record: service:http_request_duration_seconds:p99
+        expr: |
+          (
+              histogram_quantile(0.99, sum by (le, service_namespace, service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_bucket{service_namespace!=""}[5m])))
+            or (histogram_quantile(0.99, sum by (le, service_namespace, service_name, deployment_environment_name) (rate(http_server_duration_milliseconds_bucket{service_namespace!=""}[5m]))) / 1000
+                  unless on (service_namespace, service_name) src_stable:route_class:http_requests:rate5m)
+            or (histogram_quantile(0.99, sum by (le, service_namespace, service_name, deployment_environment_name) (
+                  label_replace(rate(traces_spanmetrics_latency_bucket{span_kind="SPAN_KIND_SERVER", service_namespace!=""}[5m]), "service_name", "$1", "service", "(.+)")))
+                  unless on (service_namespace, service_name)
+                    (src_stable:route_class:http_requests:rate5m or src_legacy:route_class:http_requests:rate5m))
+          ) >= 0
+
+      # namespace-wide p95 (buckets merged across services and environments)
+      - record: namespace:http_request_duration_seconds:p95
+        expr: |
+          (
+              histogram_quantile(0.95, sum by (le, service_namespace) (rate(http_server_request_duration_seconds_bucket{service_namespace!=""}[5m])))
+            or (histogram_quantile(0.95, sum by (le, service_namespace) (rate(http_server_duration_milliseconds_bucket{service_namespace!=""}[5m]))) / 1000
+                  unless on (service_namespace) src_stable:route_class:http_requests:rate5m)
+            or (histogram_quantile(0.95, sum by (le, service_namespace) (rate(traces_spanmetrics_latency_bucket{span_kind="SPAN_KIND_SERVER", service_namespace!=""}[5m])))
+                  unless on (service_namespace)
+                    (src_stable:route_class:http_requests:rate5m or src_legacy:route_class:http_requests:rate5m))
+          ) >= 0

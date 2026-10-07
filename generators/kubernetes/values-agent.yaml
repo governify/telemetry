@@ -1,0 +1,102 @@
+# Per-node agent (DaemonSet): kubelet pod/container metrics, k8s metadata for anything sent through it,
+# OTLP relay for local apps. Everything is forwarded to the gateway. Label contract: ../README.md
+# It does NOT measure the node itself: the host (CPU, memory, disk) is always measured by generators/docker-host,
+# whose HOST_NAME must equal the Kubernetes node name.
+#
+#   helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+#   helm upgrade --install otel-agent open-telemetry/opentelemetry-collector --version 0.173.1 \
+#     -n telemetry --create-namespace -f values-agent.yaml
+#
+# Edit the two "CHANGE ME" values below. Rendered and validated offline against chart 0.173.1.
+mode: daemonset
+fullnameOverride: otel-agent # Service DNS for apps: otel-agent.<release namespace>.svc:4317 / :4318
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: 0.161.0 # same as the gateway and generators/docker-host
+command:
+  name: otelcol-contrib
+
+presets:
+  hostMetrics: { enabled: false } # off on purpose: the node is measured by generators/docker-host
+  kubeletMetrics: { enabled: true } # pod + container metrics from the node's kubelet (:10250)
+  kubernetesAttributes: { enabled: true } # adds k8s.* (and derived service.*) to everything passing through
+
+# Node-local Service (internalTrafficPolicy: Local): apps send OTLP to otel-agent.<ns>.svc:4318.
+service:
+  enabled: true
+# Trace formats other than OTLP are not needed: drop the extra receivers and their ports.
+ports:
+  jaeger-compact: { enabled: false }
+  jaeger-thrift: { enabled: false }
+  jaeger-grpc: { enabled: false }
+  zipkin: { enabled: false }
+  # hostPort 4317/4318 would expose the (unauthenticated) OTLP receiver on every node's IP: use the Service instead.
+  otlp: { hostPort: 0 }
+  otlp-http: { hostPort: 0 }
+
+resources: # starting values, not measured
+  limits: { cpu: 500m, memory: 512Mi }
+  requests: { cpu: 100m, memory: 256Mi }
+# tolerations: [{ operator: Exists }] # uncomment to also run on tainted (control-plane) nodes
+
+extraEnvs:
+  - name: GATEWAY_OTLP_ENDPOINT
+    value: telemetry.governify.io:4317
+  - name: DEPLOYMENT_ENVIRONMENT # CHANGE ME: production | staging | ...
+    value: production
+  - name: K8S_CLUSTER_NAME # CHANGE ME: shows up as k8s_cluster_name
+    value: my-cluster
+
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null # the chart's self-scrape of the agent; not needed
+    kubeletstats:
+      collection_interval: 30s
+      metrics:
+        container.uptime: { enabled: true } # host:containers_running:count counts container_uptime_seconds per node
+      # Uncomment when the kubelet serves a self-signed certificate (kind, minikube, k3s, some on-prem clusters):
+      # insecure_skip_verify: true
+
+  processors:
+    resource/agent:
+      attributes:
+        # Apps behind this agent: keep the pod name as instance id BEFORE host.name is overwritten with the node.
+        - { key: service.instance.id, from_attribute: k8s.pod.name, action: insert }
+        - { key: service.instance.id, from_attribute: host.name, action: insert }
+        # host.name always means "the server" in the dashboards: here, the node.
+        - { key: host.name, value: "${env:K8S_NODE_NAME}", action: upsert }
+        - { key: k8s.node.name, value: "${env:K8S_NODE_NAME}", action: insert }
+        - { key: k8s.cluster.name, value: "${env:K8S_CLUSTER_NAME}", action: insert }
+        - { key: deployment.environment.name, value: "${env:DEPLOYMENT_ENVIRONMENT}", action: insert }
+        # application = namespace (the gateway does the same fallback; kept here so the agent output is self-contained)
+        - { key: service.namespace, from_attribute: k8s.namespace.name, action: insert }
+
+  exporters:
+    debug: null
+    otlp_grpc/gateway:
+      endpoint: ${env:GATEWAY_OTLP_ENDPOINT}
+      tls:
+        insecure: true # the gateway's OTLP port is plain gRPC today (known gap)
+      retry_on_failure:
+        max_elapsed_time: 10m
+      sending_queue:
+        queue_size: 5000
+
+  service:
+    pipelines:
+      # The presets prepend k8s_attributes and add kubeletstats to the metrics receivers.
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, resource/agent, batch]
+        exporters: [otlp_grpc/gateway]
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, resource/agent, batch]
+        exporters: [otlp_grpc/gateway]
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, resource/agent, batch]
+        exporters: [otlp_grpc/gateway]

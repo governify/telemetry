@@ -11,3 +11,7 @@ collector.telemetry.governify.io {
 	redir / /debug/servicez
 	reverse_proxy otel-collector:55679
 }
+
+jaeger.telemetry.governify.io {
+	reverse_proxy jaeger:16686
+}

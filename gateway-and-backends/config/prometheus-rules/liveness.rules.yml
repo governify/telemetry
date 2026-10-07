@@ -1,0 +1,55 @@
+# Liveness for OTLP-pushed workloads. There is no scrape `up`, so a service instance counts as alive
+# while its target_info series (refreshed on every metric push) is fresher than 3 minutes.
+# "Expected" = every service seen in the last 24h, at service granularity, so replica / pod churn
+# never shows up as missing instances. A service that is decommissioned reads as down for 24h.
+#
+# Requires service.namespace + service.name on the resource, and metrics enabled in the SDK.
+#   service:up                        {ns, service, env}  1 = at least one instance pushed in last 3m
+#   service:instances:count           {ns, service, env}  live instances (replicas)
+#   namespace:services_{up,expected,missing}:count {ns}
+groups:
+  - name: liveness
+    interval: 30s
+    rules:
+      - record: service:up
+        expr: |
+          max by (service_namespace, service_name, deployment_environment_name) (
+              (time() - timestamp(target_info{service_namespace!="", service_name!=""})) < bool 180)
+          or
+            (0 * max by (service_namespace, service_name, deployment_environment_name) (
+              last_over_time(target_info{service_namespace!="", service_name!=""}[1d])))
+
+      - record: service:instances:count
+        expr: |
+          count by (service_namespace, service_name, deployment_environment_name) (
+            (time() - timestamp(target_info{service_namespace!="", service_name!=""})) < 180)
+
+      - record: namespace:services_up:count
+        expr: sum by (service_namespace) (service:up)
+
+      - record: namespace:services_expected:count
+        expr: count by (service_namespace) (service:up)
+
+      - record: namespace:services_missing:count
+        expr: namespace:services_expected:count - namespace:services_up:count
+
+  # Health verdict per application: 0 = OK, 1 = degraded, 2 = critical.
+  # Thresholds: error ratio 1% / 5%, p95 0.5s / 1s, any expected service missing = critical.
+  - name: application_health
+    interval: 30s
+    rules:
+      - record: namespace:health_availability:state
+        expr: clamp_max(namespace:services_missing:count, 1) * 2
+
+      - record: namespace:health_errors:state
+        expr: |
+          (namespace:http_error_ratio:5m >= bool 0.01) + (namespace:http_error_ratio:5m >= bool 0.05)
+          or (0 * namespace:services_expected:count)
+
+      - record: namespace:health_latency:state
+        expr: |
+          (namespace:http_request_duration_seconds:p95 >= bool 0.5) + (namespace:http_request_duration_seconds:p95 >= bool 1)
+          or (0 * namespace:services_expected:count)
+
+      - record: namespace:health:state
+        expr: max by (service_namespace) ({__name__=~"namespace:health_(availability|errors|latency):state"})

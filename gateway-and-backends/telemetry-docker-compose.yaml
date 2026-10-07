@@ -1,6 +1,6 @@
 services:
   telemetry-caddy:
-    image: caddy:latest
+    image: caddy:2.11.4
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile
       - ./landing:/srv/landing:ro
@@ -12,11 +12,12 @@ services:
     depends_on:
       - grafana
       - otel-collector
+      - jaeger
     networks:
       - telemetry
 
   tempo:
-    image: grafana/tempo:3.0.0
+    image: grafana/tempo:3.0.3
     command:
       - -target=all
       - -config.file=/etc/tempo.yaml
@@ -30,13 +31,34 @@ services:
     networks:
       - telemetry
 
+  jaeger:
+    image: jaegertracing/jaeger:2.21.0
+    user: root # fresh named volume is root-owned; image's default non-root user can't write /badger
+    command:
+      - --config
+      - /etc/jaeger/config.yaml
+    volumes:
+      - ./config/jaeger.yaml:/etc/jaeger/config.yaml
+      - jaeger-data:/badger
+    expose:
+      - 16686 # jaeger UI
+      - 4317 # otlp grpc receiver (used by otel-collector)
+      - 4318 # otlp http receiver
+    networks:
+      - telemetry
+
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.14.0
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-otlp-receiver" # collector pushes app/host metrics here (/api/v1/otlp)
+      - "--web.enable-remote-write-receiver" # tempo metrics-generator remote-writes span metrics here
+      - "--enable-feature=exemplar-storage" # metric -> trace jumps in Grafana
     volumes:
       - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./config/prometheus-rules:/etc/prometheus/rules:ro # directory mount: edits are picked up on reload
       - prometheus-data:/prometheus
     expose:
       - 9090
@@ -44,7 +66,7 @@ services:
       - telemetry
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.7.8
     expose:
       - 3100
     volumes:
@@ -53,11 +75,13 @@ services:
       - telemetry
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.2
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://grafana.telemetry.governify.io
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/files/noc-overview.json
     volumes:
       - ./config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
       - ./config/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
@@ -73,7 +97,7 @@ services:
       - telemetry
 
   otel-collector:
-    image: otel/opentelemetry-collector
+    image: otel/opentelemetry-collector:0.161.0
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     ports: # HOST:CONTAINER
@@ -84,7 +108,6 @@ services:
       - 4317 # OTLP gRPC receiver
       - 1888 # pprof extension
       - 8888 # Prometheus metrics exposed by the Collector
-      - 8889 # Prometheus exporter metrics
       - 13133 # health_check extension
       - 55679 # zpages extension
     networks:
@@ -110,6 +133,7 @@ networks:
 
 volumes:
   tempo-data:
+  jaeger-data:
   prometheus-data:
   loki-data:
   grafana-data:

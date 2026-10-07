@@ -1,0 +1,109 @@
+# Per-server agent: host metrics + Docker container metrics, and an OTLP relay for local apps.
+# Everything is forwarded to the gateway (../../gateway-and-backends). Label contract: ../README.md
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  host_metrics:
+    root_path: /hostfs # the host's / is mounted read-only at /hostfs
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      load: {}
+      paging: {}
+      processes: {}
+      system: {}
+      filesystem:
+        metrics:
+          system.filesystem.utilization:
+            enabled: true
+        exclude_fs_types:
+          match_type: strict
+          fs_types: [autofs, binfmt_misc, bpf, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs, iso9660, mqueue, nsfs, overlay, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs, sysfs, tracefs, tmpfs]
+        exclude_mount_points:
+          match_type: regexp
+          mount_points: [/dev/.*, /proc/.*, /sys/.*, /run/.*, /snap/.*, /var/lib/docker/.*, /var/lib/kubelet/.*, /var/lib/containerd/.*]
+      disk: {}
+      network: {}
+
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    api_version: "1.41" # Docker 20.10; raise it on newer engines if the receiver complains
+    collection_interval: 30s
+    timeout: 20s
+    metrics:
+      container.uptime:
+        enabled: true
+      container.restarts:
+        enabled: true
+    # Optional identity for containers: label a container with these to line it up with the app's
+    # service.namespace / service.name. Without labels the compose project / service are used (below).
+    container_labels_to_metric_labels:
+      telemetry.service.namespace: service.namespace
+      telemetry.service.name: service.name
+      com.docker.compose.project: container.compose.project
+      com.docker.compose.service: container.compose.service
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  resource/agent:
+    attributes:
+      # Apps behind this agent: keep their own hostname (= container / pod name) as the instance id
+      # BEFORE host.name is overwritten with the server name.
+      - key: service.instance.id
+        from_attribute: host.name
+        action: insert
+      # host.name always means "the server" in the dashboards
+      - key: host.name
+        value: ${env:HOST_NAME}
+        action: upsert
+      - key: deployment.environment.name
+        value: ${env:DEPLOYMENT_ENVIRONMENT}
+        action: insert
+      # containers without telemetry.* labels fall back to their compose project / service
+      - key: service.namespace
+        from_attribute: container.compose.project
+        action: insert
+      - key: service.name
+        from_attribute: container.compose.service
+        action: insert
+  batch:
+
+exporters:
+  otlp_grpc/gateway:
+    endpoint: ${env:GATEWAY_OTLP_ENDPOINT}
+    tls:
+      insecure: true # the gateway's OTLP port is plain gRPC today (see gateway README, "known gap")
+    retry_on_failure:
+      max_elapsed_time: 10m
+    sending_queue:
+      queue_size: 5000
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp, host_metrics, docker_stats]
+      processors: [memory_limiter, resource/agent, batch]
+      exporters: [otlp_grpc/gateway]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/agent, batch]
+      exporters: [otlp_grpc/gateway]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/agent, batch]
+      exporters: [otlp_grpc/gateway]

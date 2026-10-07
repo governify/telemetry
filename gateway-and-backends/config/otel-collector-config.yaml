@@ -1,0 +1,83 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: basic
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  # Metrics go to Prometheus' native OTLP receiver (needs --web.enable-otlp-receiver).
+  # Resource attributes are promoted to labels by the `otlp:` block in prometheus.yml.
+  otlp_http/prometheus:
+    endpoint: http://prometheus:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1024
+    spike_limit_mib: 256
+  # Normalise the resource attributes the dashboards rely on (see generators/README.md).
+  # `insert` never overwrites: it only fills gaps left by the SDK / agent.
+  resource/normalize:
+    attributes:
+      # stable semconv name; older SDKs / OTEL_RESOURCE_ATTRIBUTES still send deployment.environment
+      - key: deployment.environment.name
+        from_attribute: deployment.environment
+        action: insert
+      # application = namespace: on Kubernetes fall back to the k8s namespace when the SDK sets none
+      - key: service.namespace
+        from_attribute: k8s.namespace.name
+        action: insert
+      # replicas of one service must not collide into a single series; SDKs without the
+      # serviceinstance detector fall back to the pod/container hostname
+      - key: service.instance.id
+        from_attribute: host.name
+        action: insert
+  batch:
+
+extensions:
+  zpages:
+    endpoint: 0.0.0.0:55679
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  extensions: [zpages, health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/normalize, batch]
+      exporters: [debug, otlp_grpc/tempo, otlp_grpc/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/normalize, batch]
+      exporters: [debug, otlp_http/prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/normalize, batch]
+      exporters: [debug, otlp_http/loki]

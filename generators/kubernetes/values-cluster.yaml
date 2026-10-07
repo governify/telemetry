@@ -1,0 +1,92 @@
+# Cluster-level collector (single Deployment replica): workload state (k8s_cluster) + Kubernetes events -> gateway.
+# Install once per cluster, next to the DaemonSet agent (values-agent.yaml). Label contract: ../README.md
+#
+#   helm upgrade --install otel-cluster open-telemetry/opentelemetry-collector --version 0.173.1 \
+#     -n telemetry --create-namespace -f values-cluster.yaml
+#
+# Keep replicaCount at 1: k8s_cluster and the events receiver would report everything once per replica.
+# Edit the two "CHANGE ME" values below.
+mode: deployment
+fullnameOverride: otel-cluster
+replicaCount: 1
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: 0.161.0
+command:
+  name: otelcol-contrib
+
+presets:
+  clusterMetrics: { enabled: true } # k8s.deployment.desired/available, k8s.pod.phase, k8s.container.restarts, node conditions
+  kubernetesEvents: { enabled: true } # events as logs -> Loki
+
+# Not receivers of app telemetry: no Service, no OTLP ports needed.
+service:
+  enabled: false
+ports:
+  otlp: { enabled: false }
+  otlp-http: { enabled: false }
+  jaeger-compact: { enabled: false }
+  jaeger-thrift: { enabled: false }
+  jaeger-grpc: { enabled: false }
+  zipkin: { enabled: false }
+
+resources: # starting values, not measured
+  limits: { cpu: 500m, memory: 512Mi }
+  requests: { cpu: 50m, memory: 128Mi }
+
+extraEnvs:
+  - name: GATEWAY_OTLP_ENDPOINT
+    value: telemetry.governify.io:4317
+  - name: DEPLOYMENT_ENVIRONMENT # CHANGE ME: production | staging | ...
+    value: production
+  - name: K8S_CLUSTER_NAME # CHANGE ME: shows up as k8s_cluster_name
+    value: my-cluster
+
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp: null
+    k8s_cluster:
+      collection_interval: 30s
+      node_conditions_to_report: [Ready, MemoryPressure, DiskPressure, PIDPressure]
+      metrics:
+        k8s.node.condition: { enabled: true } # optional metric, off by default
+
+  processors:
+    resource/cluster:
+      attributes:
+        - { key: k8s.cluster.name, value: "${env:K8S_CLUSTER_NAME}", action: insert }
+        - { key: deployment.environment.name, value: "${env:DEPLOYMENT_ENVIRONMENT}", action: insert }
+        # application = namespace: workloads and events of a Kubernetes namespace belong to that application
+        - { key: service.namespace, from_attribute: k8s.namespace.name, action: insert }
+    # Events have no service identity of their own: give them one so they are queryable in Loki.
+    resource/events:
+      attributes:
+        - { key: service.name, value: k8s-events, action: insert }
+
+  exporters:
+    debug: null
+    otlp_grpc/gateway:
+      endpoint: ${env:GATEWAY_OTLP_ENDPOINT}
+      tls:
+        insecure: true # the gateway's OTLP port is plain gRPC today (known gap)
+      retry_on_failure:
+        max_elapsed_time: 10m
+      sending_queue:
+        queue_size: 5000
+
+  service:
+    pipelines:
+      # The presets add k8s_cluster to metrics and the events receiver to logs.
+      metrics:
+        receivers: []
+        processors: [memory_limiter, resource/cluster, batch]
+        exporters: [otlp_grpc/gateway]
+      logs:
+        receivers: []
+        processors: [memory_limiter, resource/cluster, resource/events, batch]
+        exporters: [otlp_grpc/gateway]
+      traces: null
